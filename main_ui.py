@@ -1,12 +1,14 @@
 import sys
 import os
+from PySide6.QtCore import Qt, QSize, QThread, QObject, Signal, Slot
+from time import perf_counter
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
                                QPushButton, QSlider, QHBoxLayout, QVBoxLayout,
                                QFrame, QGraphicsBlurEffect, QFileDialog, QScrollArea,
                                QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView)
 from PySide6.QtCore import Qt, QSize
 from PySide6.QtGui import QIcon, QPixmap, QColor, QPainter, QBrush
-
+from core.main import detect
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMAGES_DIR = os.path.join(BASE_DIR, "images")
 
@@ -171,6 +173,52 @@ QTableWidget::item:selected {{
 }}
 """
 
+class DetectionWorker(QObject):
+    finished = Signal(list, int, dict, str)
+    progress = Signal(int)  # опціонально
+
+    def __init__(self, image_path, colors_to_check, params):
+        super().__init__()
+        self.image_path = image_path
+        # colors_to_check: list of tuples (color_name, bgr_tuple, hex)
+        self.colors_to_check = colors_to_check
+        self.params = params
+
+    @Slot()
+    def run(self):
+        try:
+            start = perf_counter()
+            all_results = []
+            breakdown = {}
+            for color_name, bgr, hex_color in self.colors_to_check:
+                # call detect; it returns list of Detected objects
+                try:
+                    detections = detect(
+                        self.image_path,
+                        target_color=bgr,
+                        hue_range=self.params.get("hue_range", None),
+                        min_s=self.params.get("min_s", 150),
+                        min_v=self.params.get("min_v", 60),
+                        min_area=self.params.get("min_area", 120),
+                        blur_level=self.params.get("blur_level", 1),
+                        morphology_level=self.params.get("morphology_level", 1),
+                    )
+                except Exception as e:
+                    detections = []
+                for det in detections:
+                    all_results.append({
+                        "color_name": color_name,
+                        "bgr": bgr,
+                        "hex": hex_color,
+                        "center": det.center,
+                        "box": det.box,
+                        "area": det.area
+                    })
+                breakdown[color_name] = len(detections)
+            elapsed = int((perf_counter() - start) * 1000)
+            self.finished.emit(all_results, elapsed, breakdown, "")
+        except Exception as e:
+            self.finished.emit([], 0, {}, str(e))
 
 class AspectRatioLabel(QLabel):
     def __init__(self):
@@ -213,6 +261,9 @@ class ColorHunterUI(QMainWindow):
 
         self.color_buttons = []
         self.current_image_path = None
+
+        self._detection_thread = None
+        self._detection_worker = None
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -347,6 +398,19 @@ class ColorHunterUI(QMainWindow):
         colors_vbox = QVBoxLayout()
         colors_vbox.setSpacing(8)
 
+        self.UI_COLOR_MAP = {
+            "Червоний": {"bgr": (0, 0, 255), "hex": "#FF5C5C"},
+            "Помаранчевий": {"bgr": (0, 130, 255), "hex": "#FF8200"},
+            "Жовтий": {"bgr": (0, 255, 255), "hex": "#FFD233"},
+            "Зелений": {"bgr": (0, 255, 0), "hex": "#33D12A"},
+            "Блакитний": {"bgr": (255, 255, 0), "hex": "#00E1FF"},
+            "Синій": {"bgr": (255, 0, 0), "hex": "#33A1FF"},
+            "Фіолетовий": {"bgr": (255, 0, 100), "hex": "#6400FF"},
+            "Рожевий": {"bgr": (200, 0, 255), "hex": "#FF00C8"},
+            "Білий": {"bgr": (255, 255, 255), "hex": "#FFFFFF"},
+            "Чорний": {"bgr": (0, 0, 0), "hex": "#000000"}
+        }
+
         target_colors = [
             ("Червоний", "red.svg"), ("Помаранчевий", "orange.svg"),
             ("Жовтий", "yellow.svg"), ("Зелений", "green.svg"),
@@ -429,7 +493,7 @@ class ColorHunterUI(QMainWindow):
         self.scan_btn.setIcon(QIcon(os.path.join(IMAGES_DIR, "start_scaning.svg")))
         self.scan_btn.setIconSize(QSize(16, 16))
         self.scan_btn.setFixedHeight(44)
-        self.scan_btn.clicked.connect(self.simulate_scan)
+        self.scan_btn.clicked.connect(self.start_scan)
         left_column.addWidget(self.scan_btn)
 
         left_column.addStretch()
@@ -657,77 +721,166 @@ class ColorHunterUI(QMainWindow):
     # ----------------------------------
     # ВИВЕДЕННЯ ПРИКЛАДУ РЕЗУЛЬТАТІВ
 
-    def simulate_scan(self):
+    def get_selected_colors(self):
+        selected = []
+        for btn in self.color_buttons:
+            if btn.isChecked():
+                name = btn.text().strip()
+                color_info = self.UI_COLOR_MAP.get(name)
+                if color_info:
+                    selected.append((name, color_info["bgr"], color_info["hex"]))
+        return selected
+
+    def start_scan(self):
         if not self.current_image_path:
             return
 
-        self.save_btn.show()
-        self.lbl_stat_objects.setText("9")
-        self.lbl_stat_time.setText("142 ms")
+        selected_colors = self.get_selected_colors()
+        if not selected_colors:
+            return
 
+        self.scan_btn.setEnabled(False)
+        self.lbl_stat_time.setText("—")
+        self.lbl_stat_objects.setText("…")
+        self.save_btn.hide()
+        self.hide_scan_results()
+        if self.current_image_path:
+            original_pixmap = QPixmap(self.current_image_path)
+            self.image_label.setPixmap(original_pixmap)
+            self.image_label.show()
+        params = {
+            "hue_range": None,
+            "min_s": 150,
+            "min_v": 60,
+            "min_area": int(self.slider_area.value()),
+            "blur_level": int(self.slider_blur.value()),
+            "morphology_level": int(self.slider_morph.value())
+        }
+
+        self._detection_thread = QThread()
+        self._detection_worker = DetectionWorker(self.current_image_path, selected_colors, params)
+        self._detection_worker.moveToThread(self._detection_thread)
+        self._detection_thread.started.connect(self._detection_worker.run)
+        # on finish
+        self._detection_worker.finished.connect(self.on_detection_finished)
+
+        def cleanup(results, elapsed, breakdown, error):
+            try:
+                self._detection_thread.quit()
+                self._detection_thread.wait(2000)
+            except Exception:
+                pass
+
+        self._detection_worker.finished.connect(cleanup)
+
+        self._detection_thread.start()
+
+    @Slot(list, int, dict, str)
+    def on_detection_finished(self, results, elapsed_ms, breakdown, error_message):
+        self.scan_btn.setEnabled(True)
+        if error_message:
+            self.lbl_stat_time.setText("error")
+            return
+
+        total_objects = len(results)
+        self.lbl_stat_objects.setText(str(total_objects))
+        self.lbl_stat_time.setText(f"{elapsed_ms} ms")
         for i in reversed(range(self.breakdown_tags_layout.count())):
-            self.breakdown_tags_layout.itemAt(i).widget().setParent(None)
+            w = self.breakdown_tags_layout.itemAt(i).widget()
+            if w:
+                w.setParent(None)
 
-        dummy_breakdown = [("Червоний", "#FF5C5C", 4), ("Жовтий", "#FFD233", 2),
-                           ("Синій", "#33A1FF", 2), ("Помаранчевий", "#FF9F33", 1)]
-
-        for name, hex_color, count in dummy_breakdown:
+        for color_name, count in breakdown.items():
+            hex_color = self.UI_COLOR_MAP.get(color_name, {}).get("hex", "#000000")
             tag = QLabel(
-                f"<span style='color:{hex_color};'>●</span> {name}: <span style='color:{TEXT_MAIN};'>{count}</span>")
+                f"<span style='color:{hex_color};'>●</span> {color_name}: <span style='color:{TEXT_MAIN};'>{count}</span>")
             tag.setStyleSheet(
                 f"background-color: #FCFAFF; border: 1px solid #EBE1FF; border-radius: 12px; padding: 6px 12px; font-size: 11px; font-weight: bold;")
             self.breakdown_tags_layout.addWidget(tag)
+        if breakdown:
+            self.breakdown_card.show()
 
-        self.breakdown_card.show()
-        self.reg_entries_lbl.setText("9 entries")
+        self.table.setRowCount(total_objects)
+        for row_idx, item in enumerate(results):
+            id_item = QTableWidgetItem(f"{row_idx + 1:03d}")
+            id_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            id_item.setForeground(QColor(TEXT_MUTED))
+            self.table.setItem(row_idx, 0, id_item)
+
+            color_item = QTableWidgetItem(item["color_name"])
+            dot_pixmap = QPixmap(32, 32)
+            dot_pixmap.fill(Qt.transparent)
+            painter = QPainter(dot_pixmap)
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(QBrush(QColor(item["hex"])))
+            painter.setPen(Qt.NoPen)
+            painter.drawEllipse(4, 4, 24, 24)
+            painter.end()
+            color_item.setIcon(QIcon(dot_pixmap))
+            self.table.setItem(row_idx, 1, color_item)
+
+            # center
+            cx, cy = item["center"]
+            center_item = QTableWidgetItem(f"{cx}, {cy}")
+            center_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            self.table.setItem(row_idx, 2, center_item)
+
+            # bbox
+            x, y, w, h = item["box"]
+            bbox_item = QTableWidgetItem(f"{x}, {y}, {w}, {h}")
+            bbox_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            self.table.setItem(row_idx, 3, bbox_item)
+
+            area_item = QTableWidgetItem(f"{int(item['area'])} px")
+            area_item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            self.table.setItem(row_idx, 4, area_item)
+
+        if total_objects > 0:
+            self.reg_entries_lbl.setText(f"{total_objects} entries")
+            self.registry_card.show()
+            self.render_detections_on_pixmap(self.current_image_path, results)
+            self.save_btn.show()
+        else:
+            self.reg_entries_lbl.setText("0 entries")
+            self.registry_card.hide()
+            self.save_btn.hide()
 
 
-        dummy_data = [
-            ("001", "Червоний", "240, 120", "220, 100, 40, 40", "1600 px"),
-            ("004", "Червоний", "600, 150", "580, 130, 40, 40", "1600 px"),
-            ("007", "Червоний", "150, 200", "130, 180, 40, 40", "1600 px"),
-            ("009", "Червоний", "500, 500", "480, 480, 40, 40", "1600 px"),
-            ("002", "Жовтий", "450, 310", "430, 290, 40, 40", "1600 px"),
-            ("006", "Жовтий", "700, 600", "680, 580, 40, 40", "1600 px"),
-            ("003", "Синій", "120, 500", "100, 480, 40, 40", "1600 px"),
-            ("008", "Синій", "800, 100", "780, 80, 40, 40", "1600 px"),
-            ("005", "Помаранчевий", "320, 400", "300, 380, 40, 40", "1600 px"),
-        ]
+    def simulate_scan(self):
+        self.start_scan()
 
-        color_map = {
-            "Червоний": "#FF5C5C",
-            "Жовтий": "#FFD233",
-            "Синій": "#33A1FF",
-            "Помаранчевий": "#FF9F33"
-        }
+    def render_detections_on_pixmap(self, image_path, results):
+        base = QPixmap(image_path)
+        if base.isNull():
+            return
 
-        self.table.setRowCount(len(dummy_data))
-        for row_idx, row_data in enumerate(dummy_data):
-            for col_idx, text in enumerate(row_data):
-                item = QTableWidgetItem(text)
-                item.setTextAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        pix = QPixmap(base)
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing)
 
-                if col_idx == 0:
-                    item.setForeground(QColor(TEXT_MUTED))
+        black_pen = painter.pen()
+        black_pen.setColor(Qt.black)
+        black_pen.setWidth(2)
 
-                elif col_idx == 1:
-                    color_hex = color_map.get(text, "#000000")
-                    dot_pixmap = QPixmap(32, 32)
-                    dot_pixmap.fill(Qt.transparent)
+        for item in results:
+            try:
+                x, y, w, h = map(int, item["box"])
+                cx, cy = map(int, item["center"])
+            except Exception:
+                continue
 
-                    painter = QPainter(dot_pixmap)
-                    painter.setRenderHint(QPainter.Antialiasing)
-                    painter.setBrush(QBrush(QColor(color_hex)))
-                    painter.setPen(Qt.NoPen)
-                    painter.drawEllipse(4, 4, 24, 24)
-                    painter.end()
+            painter.setPen(black_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(x, y, w, h)
 
-                    item.setIcon(QIcon(dot_pixmap))
+            hex_color = item.get("hex", "#FF0000")
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QBrush(QColor(hex_color)))
+            painter.drawEllipse(cx - 3, cy - 3, 6, 6)
 
-                self.table.setItem(row_idx, col_idx, item)
-
-        self.registry_card.show()
-
+        painter.end()
+        self.image_label.setPixmap(pix)
+        self.image_label.show()
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
