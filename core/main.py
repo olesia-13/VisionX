@@ -100,13 +100,11 @@ def detect(
     saturation = target_color[0][0][1]
     value = target_color[0][0][2]
 
-    # Специальная обработка для черного и белого
-    if value < 60:  # черный (очень темный)
+    if value < 60:
         mask = make_hsv_mask_for_black(img_hsv)
-    elif saturation < 30 and value > 200:  # белый (светлый и ненасыщенный)
+    elif saturation < 30 and value > 200:
         mask = make_hsv_mask_for_white(img_hsv)
     else:
-        # обычная детекция для других цветов
         mask = make_hsv_mask(img_hsv, hue, hue_range, min_s, min_v)
     mask = clean_mask(mask, morphology_level)
 
