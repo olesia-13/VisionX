@@ -777,12 +777,41 @@ class ColorHunterUI(QMainWindow):
 
     @Slot(list, int, dict, str)
     def on_detection_finished(self, results, elapsed_ms, breakdown, error_message):
-        self.scan_btn.setEnabled(True)
+        # === КОНСОЛЬНИЙ ВИВІД ===
+        print("\n" + "=" * 70)
+        print("DETECTION RESULTS")
+        print("=" * 70)
+
         if error_message:
+            print(f"Error: {error_message}")
             self.lbl_stat_time.setText("error")
+            print("=" * 70 + "\n")
             return
 
         total_objects = len(results)
+        print(f"Detected objects: {total_objects}")
+        print(f"Scan time: {elapsed_ms} ms")
+        print(f"Breakdown: {breakdown}")
+
+        if total_objects > 0:
+            print("\nObject List:")
+            print("-" * 70)
+            print(f"{'ID':<5} {'Color':<15} {'BBox (x,y,w,h)':<25} {'Center (x,y)':<15} {'Area':<10}")
+            print("-" * 70)
+
+            for idx, item in enumerate(results, 1):
+                color_name = item.get("color_name", "unknown")
+                x, y, w, h = item["box"]
+                cx, cy = item["center"]
+                area = int(item["area"])
+                bbox_str = f"({x}, {y}, {w}, {h})"
+                center_str = f"({cx}, {cy})"
+
+                print(f"#{idx:<4} {color_name:<15} {bbox_str:<25} {center_str:<15} {area:<10}")
+
+        print("-" * 70)
+        print("Scan completed successfully")
+        print("=" * 70 + "\n")
         self.lbl_stat_objects.setText(str(total_objects))
         self.lbl_stat_time.setText(f"{elapsed_ms} ms")
         for i in reversed(range(self.breakdown_tags_layout.count())):
