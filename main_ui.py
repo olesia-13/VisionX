@@ -525,7 +525,7 @@ class ColorHunterUI(QMainWindow):
         self.save_btn.setObjectName("SaveButton")
         self.save_btn.setIcon(QIcon(os.path.join(IMAGES_DIR, "save.svg")))
         self.save_btn.hide()
-
+        self.save_btn.clicked.connect(self.save_detection_result)
         det_header_layout.addWidget(det_title)
         det_header_layout.addStretch()
         det_header_layout.addWidget(self.save_btn)
@@ -881,6 +881,27 @@ class ColorHunterUI(QMainWindow):
         painter.end()
         self.image_label.setPixmap(pix)
         self.image_label.show()
+
+    def save_detection_result(self):
+        from PySide6.QtWidgets import QFileDialog
+
+        if not self.current_image_path:
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Зберегти результат детекції",
+            os.path.join(os.path.dirname(self.current_image_path), "detected.png"),
+            "PNG Images (*.png);;JPEG Images (*.jpg);;All Files (*)"
+        )
+
+        if save_path:
+            pixmap = self.image_label._pixmap
+            if pixmap and not pixmap.isNull():
+                if pixmap.save(save_path):
+                    print(f"Результат збережено: {save_path}")
+                else:
+                    print(f"Помилка при збереженні")
 
     def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
